@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Giám sát vườn cây công nghiệp</title>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+  :root{--bg:#f3f6f1;--ink:#1d2b22;--card:#fff;--line:#d6dfd3;--ok:#2e7d4f;--off:#8a948c}
+  *{box-sizing:border-box}
+  body{font-family:"Times New Roman",Arial,sans-serif;background:var(--bg);color:var(--ink);max-width:960px;margin:0 auto;padding:20px 14px}
+  h1{font-size:26px;margin:0 0 4px}
+  #status{margin:0 0 18px;color:var(--off);font-family:Arial,sans-serif;font-size:14px}
+  .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-bottom:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:16px}
+  .label{font-family:Arial,sans-serif;font-size:14px;color:var(--off)}
+  .value{font-size:44px;font-weight:bold;margin-top:4px}
+  button{font:16px Arial,sans-serif;padding:12px 22px;border:0;border-radius:6px;cursor:pointer;color:#fff;background:var(--off);margin-right:10px}
+  button.on{background:var(--ok)}
+  .card.dry{border-color:#e6a23c;background:#fff8ec}
+  .card.vdry{border-color:#e53935;background:#fff0ef}
+  .card.good{border-color:#2e7d4f}
+  .badge{display:inline-block;margin-top:8px;padding:4px 10px;border-radius:12px;font:14px Arial,sans-serif;color:#fff;background:var(--ok)}
+  .badge.dry{background:#e6a23c}.badge.vdry{background:#e53935}
+  .bar{height:14px;background:#e4e9e3;border-radius:7px;margin-top:10px;overflow:hidden}
+  .bar>div{height:100%;width:0;background:#1e88e5;transition:width .4s}
+  .mistText{font:14px Arial,sans-serif;margin-top:6px}
+  .rule{font:13px Arial,sans-serif;color:var(--off);margin:0 0 14px}
+  button:focus-visible{outline:3px solid #1e88e5;outline-offset:2px}
+</style>
+</head>
+<body>
+<h1>Giám sát vườn cà phê / hồ tiêu</h1>
+<p id="status">Đang kết nối broker...</p>
+
+<div class="row">
+  <div class="card"><div class="label">Nhiệt độ</div><div class="value"><span class="temp">--</span> °C</div></div>
+  <div class="card" id="humCard"><div class="label">Độ ẩm (cần giữ 40% – 60%)</div><div class="value"><span class="hum">--</span> %</div><span class="badge" id="humBadge">Chờ dữ liệu</span></div>
+  <div class="card"><div class="label">Công suất phun sương</div><div class="value"><span class="mist">--</span> %</div><div class="bar"><div id="mistBar"></div></div><div class="mistText" id="mistText">Chờ dữ liệu</div></div>
+</div>
+
+<p class="rule">Quy tắc phun sương: độ ẩm 35–40% → 25% trong 10 s · 30–35% → 50% trong 20 s · dưới 30% → 100% trong 30 s</p>
+<div class="row">
+  <div class="card"><canvas id="chartTemp"></canvas></div>
+  <div class="card"><canvas id="chartHum"></canvas></div>
+</div>
+
+<div class="card">
+  <div class="label" style="margin-bottom:10px">Điều khiển thủ công</div>
+  <button id="btnPump" onclick="toggle('pump')">Máy bơm: TẮT</button>
+  <button id="btnFan" onclick="toggle('fan')">Quạt: TẮT</button>
+</div>
+
+<script>
+const PREFIX = "hotenlop/vuon";   // phải trùng với code ESP32
+const client = mqtt.connect("wss://broker.hivemq.com:8884/mqtt");
+const state = {pump:false, fan:false};
+
+client.on("connect", () => {
+  document.getElementById("status").textContent = "Đã kết nối broker";
+  client.subscribe(PREFIX + "/data");
+});
+client.on("error", () => {
+  document.getElementById("status").textContent = "Lỗi kết nối broker";
+});
+
+function makeChart(id, label, color){
+  return new Chart(document.getElementById(id), {
+    type:"line",
+    data:{labels:[], datasets:[{label, data:[], borderColor:color, tension:.3}]},
+    options:{animation:false}
+  });
+}
+const cT = makeChart("chartTemp","Nhiệt độ (°C)","#e53935");
+const cH = makeChart("chartHum","Độ ẩm (%)","#1e88e5");
+cH.data.datasets.push({label:"Ngưỡng 40%", data:[], borderColor:"#e6a23c", borderDash:[6,4], pointRadius:0});
+cH.options.scales = {y:{min:0, max:100}};
+
+function push(chart, v){
+  chart.data.labels.push(new Date().toLocaleTimeString());
+  chart.data.datasets[0].data.push(v);
+  if(chart.data.datasets[1]) chart.data.datasets[1].data.push(40);
+  if(chart.data.labels.length > 30){ chart.data.labels.shift(); chart.data.datasets.forEach(ds => ds.data.shift()); }
+  chart.update();
+}
+
+client.on("message", (topic, payload) => {
+  const d = JSON.parse(payload.toString());
+  document.querySelector(".temp").textContent = d.temp;
+  document.querySelector(".hum").textContent  = d.hum;
+  document.querySelector(".mist").textContent = d.mist;
+  push(cT, d.temp); push(cH, d.hum);
+  showHumidity(d.hum);
+  showMist(d.mist, d.left);
+});
+
+function showHumidity(h){
+  const card = document.getElementById("humCard"), badge = document.getElementById("humBadge");
+  card.className = "card"; badge.className = "badge";
+  if (h >= 40)      { card.classList.add("good"); badge.textContent = "Độ ẩm ổn định"; }
+  else if (h >= 30) { card.classList.add("dry");  badge.classList.add("dry");  badge.textContent = "Hơi khô – cần phun sương"; }
+  else              { card.classList.add("vdry"); badge.classList.add("vdry"); badge.textContent = "Rất khô – phun tối đa"; }
+}
+function showMist(p, left){
+  document.getElementById("mistBar").style.width = p + "%";
+  document.getElementById("mistText").textContent =
+    p > 0 ? "Đang phun " + p + "% – còn " + left + " giây" : "Máy phun sương đang tắt";
+}
+
+function toggle(dev){
+  state[dev] = !state[dev];
+  client.publish(PREFIX + "/cmd/" + dev, state[dev] ? "1" : "0");
+  const b = document.getElementById(dev === "pump" ? "btnPump" : "btnFan");
+  b.textContent = (dev === "pump" ? "Máy bơm: " : "Quạt: ") + (state[dev] ? "BẬT" : "TẮT");
+  b.classList.toggle("on", state[dev]);
+}
+</script>
+</body>
+</html>
